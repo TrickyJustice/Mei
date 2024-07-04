@@ -1,0 +1,6 @@
+model_checkpoints_loss/
+model_checkpoints_mse_loss/
+model_checkpoints_normalized_img_loss/
+main/wandb/
+main/__pycache__/
+
