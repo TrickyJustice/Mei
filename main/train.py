@@ -25,7 +25,7 @@ from PIL import Image
 import numpy as np
 from clipEmbedding import CLIPEncoder
 from net import Mei
-from loss import MutualInformationLoss, ods_loss, CCALoss, ODSLoss, MMDLoss, KLDivergence
+from loss import MutualInformationLoss, ods_loss, CCALoss, ODSLoss, MMDLoss, KLDivergence, CosineSimilarityLoss
 from dist_utils import synchronize, get_world_size, clip_grad_norm_
 import wandb
 from utils import init_random_seed, set_random_seed, save_checkpoint, load_checkpoint
@@ -38,9 +38,9 @@ LATENT_DIR_X1 = "/home/a2soni/latents_x1"
 GRADIENT_CLIP = 0.05
 EMA_RATE = 0.999
 LOG_INTERVAL = 500
-SAVE_MODEL_STEPS = 50000
+SAVE_MODEL_STEPS = 25000
 SAVE_MODEL_EPOCHS = 1
-OUTPUT_DIR = "/home/a2soni/Mei/model_checkpoints_min_max_scaled_img_loss"
+OUTPUT_DIR = "/home/a2soni/Mei/model_checkpoints_min_max_scaled_img_mse_kld_cos_loss"
 MIXED_PRECISION = 'fp16'
 GRADIENT_ACCUMULATION_STEPS = 1
 SEED = 7
@@ -79,11 +79,12 @@ def train(model, model_ema, num_epochs, train_dataloader, clipModel, optimizer, 
     global_step = 0
     total_steps = len(train_dataloader) * num_epochs
     log_buffer = LogBuffer()
-    # mse = MSELoss(reduction = '')
+    mse = MSELoss(size_average = False)
     # l1 = L1Loss(reduction = 'mean')
     # mutualInfoLoss = MutualInformationLoss()
     # mmdloss = MMDLoss(device = current_device)
     kldloss = KLDivergence()
+    cossim = CosineSimilarityLoss()
     # beta_raw = torch.tensor(-6.0, requires_grad=True)
     # optimizer.add_param_group({'params': beta_raw})
     # ccaloss = CCALoss()
@@ -95,13 +96,6 @@ def train(model, model_ema, num_epochs, train_dataloader, clipModel, optimizer, 
         for step, batch in enumerate(train_dataloader):
             data_time_all += time.time() - data_time_start
 
-            # latent_x1 = batch["latent_x1"]/4
-            # latent_x1 = ((batch["latent_x1"] - batch["latent_x1"].min(dim = 1).values)/(batch["latent_x1"].max(dim = 1).values - batch["latent_x1"].min(dim = 1).values))*2 - 1
-            # latent_x2 = batch["latent_x2"]
-
-            # latent_x2 = latent_x2.to(torch.float32)
-            # print(latent_x1.type())
-            # prev_caption_text = batch["original_caption"]
             caption_text = batch["original_caption"]
 
             #getting text embeddings : prev_caption is used for passing embedding representation difference in adaptive group normalization layer
@@ -110,36 +104,24 @@ def train(model, model_ema, num_epochs, train_dataloader, clipModel, optimizer, 
            
             #maintaing model required dimensions
             latent_x1 = batch["latent_x1"]
-            print(latent_x1.shape)
+            batch_size = latent_x1.shape[0]
+            # print(latent_x1.shape)
             latent_x1 = latent_x1.squeeze(1)
-            latent_x1_flat = latent_x1.view(latent_x1.size(0), -1)
+            # latent_x1_flat = latent_x1.view(latent_x1.size(0), -1)
 
-            # Compute min and max
-            min_values = latent_x1_flat.min(dim=1, keepdim=True).values.unsqueeze(-1).unsqueeze(-1)
-            max_values = latent_x1_flat.max(dim=1, keepdim=True).values.unsqueeze(-1).unsqueeze(-1)
+            # # Compute min and max
+            # min_values = latent_x1_flat.min(dim=1, keepdim=True).values.unsqueeze(-1).unsqueeze(-1)
+            # max_values = latent_x1_flat.max(dim=1, keepdim=True).values.unsqueeze(-1).unsqueeze(-1)
 
-            # Ensure min and max values are broadcastable across all dimensions of latent_x1
-            # min_values and max_values now have shape [128, 1, 1, 1]
-
-            # Normalize latent_x1
-            latent_x1 = ((latent_x1 - min_values) / (max_values - min_values)) * 2 - 1
-            
-            # latent_x1 = ((latent_x1 - latent_x1.view(latent_x1.size(0), -1).min(dim = 1).values)/(latent_x1.view(latent_x1.size(0), -1).max(dim = 1).values - latent_x1.view(latent_x1.size(0), -1).min(dim = 1).values))*2 - 1
-            # latent_x1 = ((latent_x1 - latent_x1.min(dim = 1).values)/(latent_x1.max(dim = 1).values - latent_x1.min(dim = 1).values))*2 - 1
-            print(latent_x1.shape)
-            clipemb = clipemb.unsqueeze(1).unsqueeze(2)
-            # att_mask = att_mask.unsqueeze(1).unsqueeze(2)
-            # embed_avg = embed_avg.unsqueeze(1).unsqueeze(2)
-
-            # prev_embed = prev_embed.unsqueeze(1)
-            # prev_attn_mask = prev_attn_mask.unsqueeze(1).unsqueeze(2)
-            # embed_avg_prev = embed_avg_prev.unsqueeze(1).unsqueeze(2)
-            
+            # # Normalize latent_x1
+            # latent_x1 = ((latent_x1 - min_values) / (max_values - min_values)) * 2 - 1
+            # print(latent_x1.shape)
+            embed = clipemb.unsqueeze(1).unsqueeze(2)
 
             grad_norm = None
             with accelerator.accumulate(model):
                 optimizer.zero_grad()
-                predicted_latent, mu, logvar, z = model(latent_x1, clipemb)
+                predicted_latent, mu, logvar, z = model(latent_x1, embed)
                 # print(predicted_latent.type())
                 # loss = mmdloss(predicted_latent, latent_x1)
                 
@@ -148,10 +130,11 @@ def train(model, model_ema, num_epochs, train_dataloader, clipModel, optimizer, 
                 # l1_loss2 = l1(predicted_latent, latent_x2)
                 
                 ###Experiments###
-                mse_loss = F.mse_loss(predicted_latent, latent_x1, size_average=False).div(latent_x1.shape[0])
-                # mse_loss = mse(latent_x1, predicted_latent)
+                # mse_loss = F.mse_loss(predicted_latent, latent_x1, size_average=False).div(latent_x1.shape[0])
+                mse_loss = mse(latent_x1, predicted_latent)/batch_size
                 kld_loss = kldloss(mu, logvar)
-                loss = mse_loss + 4 * kld_loss
+                cos_sim = cossim(z, clipemb)
+                loss = mse_loss + 0.4 * kld_loss + 3*cos_sim
                 # loss = l1_loss + torch.sqrt(l1_loss)*mse_loss
                 # beta = torch.sigmoid(beta_raw)
                 
@@ -167,7 +150,7 @@ def train(model, model_ema, num_epochs, train_dataloader, clipModel, optimizer, 
             logs = {"train_loss": accelerator.gather(loss).mean().item()}
             if grad_norm is not None:
                 logs.update(grad_norm=accelerator.gather(grad_norm).mean().item())
-            # logs.update(mmd_loss = accelerator.gather(loss).mean().item())
+            logs.update(cps_sim = accelerator.gather(cos_sim).mean().item())
             logs.update(mse_loss = accelerator.gather(mse_loss).mean().item())
             logs.update(kld_loss = accelerator.gather(kld_loss).mean().item())
             log_buffer.update(logs)

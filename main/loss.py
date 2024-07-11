@@ -1,5 +1,7 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
 
 class MutualInformationLoss:
     def __init__(self, bins=32, range=None):
@@ -205,7 +207,7 @@ class MMDloss(nn.Module):
         YX = kernels[batch_size:, :batch_size]
         loss = torch.mean(XX + YY - XY -YX)
         return loss
-    
+
 class KLDivergence(nn.Module):
     def __init__(self):
         super(KLDivergence, self).__init__()
@@ -227,3 +229,34 @@ class KLDivergence(nn.Module):
         
         kld = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1)
         return kld.mean()
+    
+
+class CosineSimilarityLoss(nn.Module):
+    def __init__(self):
+        super(CosineSimilarityLoss, self).__init__()
+    
+    def forward(self, x, y):
+        # Normalize x and y to unit vectors along the last dimension
+        x_normalized = F.normalize(x, p=2, dim=1)
+        y_normalized = F.normalize(y, p=2, dim=1)
+        
+        # Compute cosine similarity along the last dimension
+        cosine_similarity = torch.sum(x_normalized * y_normalized, dim=1)
+        
+        # Since we want to maximize the cosine similarity, and PyTorch minimizes the loss,
+        # we can subtract the cosine similarity from 1 to convert it into a loss.
+        # We take the mean loss over all samples in the batch.
+        return 1 - cosine_similarity.mean()
+
+# Example usage:
+if __name__ == "__main__":
+    # Creating dummy tensors
+    tensor1 = torch.randn(3, 512)
+    tensor2 = torch.randn(3, 512)
+
+    # Instantiating the loss class
+    loss_fn = CosineSimilarityLoss()
+
+    # Computing the loss
+    loss = loss_fn(tensor1, tensor2)
+    print("Cosine Similarity Loss:", loss.item())

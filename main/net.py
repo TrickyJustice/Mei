@@ -487,5 +487,5 @@ if __name__ == '__main__':
 
     y = y.unsqueeze(1).unsqueeze(2).to(device)
 
-    x = model(latent_image_batch, y)
-    print(x.shape)
+    x, mu, logvar, z = model(latent_image_batch, y)
+    print(z.shape)
